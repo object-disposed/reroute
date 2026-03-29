@@ -138,7 +138,7 @@ async fn handle_request(
         (&Method::GET, "/") => html_response(INDEX_HTML),
         (&Method::GET, "/api/routed") => {
             let snapshot = state.routed_snapshot.load_full();
-            let entries = snapshot
+            let entries: Vec<&RoutedEntry> = snapshot
                 .as_ref()
                 .map(|v| v.iter().collect())
                 .unwrap_or_default();

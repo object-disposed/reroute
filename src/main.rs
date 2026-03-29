@@ -120,7 +120,12 @@ async fn main() -> Result<()> {
 
 struct RerouteResult<C> {
     client: C,
+    routed_snapshot: RerouteStateSnapshot,
+}
+
+struct RerouteStateSnapshot {
     routed_snapshot: Arc<ArcSwapOption<Vec<reroute::RoutedEntry>>>,
+    route_ttl_secs: Option<u64>,
 }
 
 struct PartialAppState {
@@ -264,11 +269,6 @@ fn create_reroute_if_needed(
             },
         }),
     }
-}
-
-struct RerouteStateSnapshot {
-    routed_snapshot: Arc<ArcSwapOption<Vec<reroute::RoutedEntry>>>,
-    route_ttl_secs: Option<u64>,
 }
 
 fn create_domain_routing_if_needed(
