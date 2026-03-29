@@ -20,6 +20,11 @@ button:hover { background: #c73e54; }
 table { width: 100%; border-collapse: collapse; margin-top: 10px; }
 th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #0f3460; font-size: 13px; }
 th { color: #e94560; font-weight: 600; }
+th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sortable:hover { color: #ff6b8a; }
+th.sortable .sort-arrow { margin-left: 4px; opacity: 0.4; font-style: normal; }
+th.sortable.sort-asc .sort-arrow,
+th.sortable.sort-desc .sort-arrow { opacity: 1; }
 .form-row { display: flex; gap: 8px; margin-bottom: 15px; }
 .form-row input { flex: 1; }
 .result-box { background: #16213e; border: 1px solid #0f3460; border-radius: 6px; padding: 15px; margin-top: 10px; }
@@ -29,6 +34,9 @@ th { color: #e94560; font-weight: 600; }
 .tag-blue { background: #1a1a5c; color: #6b6bff; }
 .count { color: #888; font-size: 13px; margin-left: 10px; }
 .empty { color: #555; font-style: italic; padding: 20px 0; }
+.age-fresh { color: #6bff6b; }
+.age-mid   { color: #ffd76b; }
+.age-old   { color: #ff6b6b; }
 </style>
 </head>
 <body>
@@ -45,7 +53,13 @@ th { color: #e94560; font-weight: 600; }
     <input type="text" id="routed-filter" placeholder="Filter..." oninput="renderRouted()">
   </div>
   <table>
-    <thead><tr><th>IP</th><th>Domain</th></tr></thead>
+    <thead>
+      <tr>
+        <th class="sortable" id="th-ip" onclick="setRoutedSort('ip')">IP <em class="sort-arrow">&#9650;</em></th>
+        <th class="sortable" id="th-comment" onclick="setRoutedSort('comment')">Domain <em class="sort-arrow">&#9650;</em></th>
+        <th class="sortable" id="th-age" onclick="setRoutedSort('age')">Last Seen <em class="sort-arrow">&#9650;</em></th>
+      </tr>
+    </thead>
     <tbody id="routed-body"></tbody>
   </table>
   <div id="routed-empty" class="empty" style="display:none">No routed IPs</div>
@@ -56,7 +70,7 @@ th { color: #e94560; font-weight: 600; }
   <div class="form-row">
     <select id="stats-date" onchange="onDateChange()" style="background:#16213e;border:1px solid #0f3460;color:#e0e0e0;padding:8px 12px;border-radius:4px;font-size:14px"></select>
     <input type="text" id="stats-filter" placeholder="Filter by IP..." oninput="renderStats()">
-    <button onclick="clearStatsFilter()" title="Clear filter">✕</button>
+    <button onclick="clearStatsFilter()" title="Clear filter">&#10005;</button>
   </div>
   <table>
     <thead><tr><th>IP</th><th>Device</th><th>Queries</th><th>Top Domain</th></tr></thead>
@@ -106,6 +120,10 @@ th { color: #e94560; font-weight: 600; }
 
 <script>
 let routedData = [];
+// sortKey: 'ip' | 'comment' | 'age'
+// sortDir: 'asc' | 'desc'
+let routedSortKey = 'age';
+let routedSortDir = 'asc'; // asc = oldest first (closest to expiry)
 
 function showTab(id) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -123,26 +141,114 @@ async function loadRouted() {
   } catch(e) {}
 }
 
+function setRoutedSort(key) {
+  if (routedSortKey === key) {
+    routedSortDir = routedSortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    routedSortKey = key;
+    // Default directions: age asc = oldest first; text fields asc = A-Z
+    routedSortDir = 'asc';
+  }
+  updateSortHeaders();
+  renderRouted();
+}
+
+function updateSortHeaders() {
+  const cols = ['ip', 'comment', 'age'];
+  const arrowUp = '&#9650;';
+  const arrowDown = '&#9660;';
+  cols.forEach(col => {
+    const th = document.getElementById('th-' + col);
+    th.classList.remove('sort-asc', 'sort-desc');
+    const arrow = th.querySelector('.sort-arrow');
+    if (col === routedSortKey) {
+      th.classList.add('sort-' + routedSortDir);
+      arrow.innerHTML = routedSortDir === 'asc' ? arrowUp : arrowDown;
+    } else {
+      arrow.innerHTML = arrowUp;
+    }
+  });
+}
+
+/**
+ * Format seconds-ago into a human-readable string.
+ * ageSecs: how many seconds have elapsed since last_seen_secs.
+ */
+function formatAge(ageSecs) {
+  if (ageSecs < 0) ageSecs = 0;
+  if (ageSecs < 60)  return ageSecs + 's ago';
+  if (ageSecs < 3600) return Math.floor(ageSecs / 60) + 'm ago';
+  if (ageSecs < 86400) return Math.floor(ageSecs / 3600) + 'h ago';
+  return Math.floor(ageSecs / 86400) + 'd ago';
+}
+
+/**
+ * Pick a CSS class for the age cell based on how old the entry is.
+ * This gives a visual hint about proximity to expiry.
+ * Thresholds are intentionally relative (not tied to route_ttl which
+ * the frontend doesn't know), so even without TTL the colour gives
+ * useful signal.
+ */
+function ageClass(ageSecs) {
+  if (ageSecs < 3600)   return 'age-fresh'; // < 1h  — green
+  if (ageSecs < 21600)  return 'age-mid';   // < 6h  — yellow
+  return 'age-old';                          // >= 6h — red
+}
+
 function renderRouted() {
+  const nowSecs = Math.floor(Date.now() / 1000);
   const filter = document.getElementById('routed-filter').value.toLowerCase();
+
   const filtered = routedData.filter(e =>
     e.ip.includes(filter) || (e.comment && e.comment.toLowerCase().includes(filter))
   );
+
+  // Sort
+  filtered.sort((a, b) => {
+    let cmp = 0;
+    if (routedSortKey === 'ip') {
+      // Numeric IP sort
+      const toNum = ip => ip.split('.').reduce((acc, oct) => acc * 256 + parseInt(oct, 10), 0);
+      cmp = toNum(a.ip) - toNum(b.ip);
+    } else if (routedSortKey === 'comment') {
+      cmp = (a.comment || '').localeCompare(b.comment || '');
+    } else {
+      // age: sort by last_seen_secs ascending = oldest first = closest to expiry first
+      // last_seen_secs may be absent for entries loaded from router at startup
+      const aSecs = a.last_seen_secs || 0;
+      const bSecs = b.last_seen_secs || 0;
+      cmp = aSecs - bSecs; // smaller timestamp = older = expires sooner
+    }
+    return routedSortDir === 'asc' ? cmp : -cmp;
+  });
+
   document.getElementById('routed-count').textContent = '(' + routedData.length + ')';
   const tbody = document.getElementById('routed-body');
   const empty = document.getElementById('routed-empty');
+
   if (filtered.length === 0) {
     tbody.innerHTML = '';
     empty.style.display = 'block';
     return;
   }
   empty.style.display = 'none';
-  tbody.innerHTML = filtered.map(e =>
-    '<tr><td>' + esc(e.ip) + '</td><td>' + esc(e.comment || '') + '</td></tr>'
-  ).join('');
+
+  tbody.innerHTML = filtered.map(e => {
+    const lastSeen = e.last_seen_secs || 0;
+    const ageSecs = lastSeen > 0 ? nowSecs - lastSeen : null;
+    const ageText = ageSecs !== null ? formatAge(ageSecs) : '—';
+    const cls = ageSecs !== null ? ageClass(ageSecs) : '';
+    return '<tr>'
+      + '<td>' + esc(e.ip) + '</td>'
+      + '<td>' + esc(e.comment || '') + '</td>'
+      + '<td class="' + cls + '">' + esc(ageText) + '</td>'
+      + '</tr>';
+  }).join('');
 }
 
 setInterval(loadRouted, 5000);
+// Also re-render every second so the "X ago" labels stay live
+setInterval(() => { if (routedData.length > 0) renderRouted(); }, 1000);
 loadRouted();
 
 // --- Stats ---
@@ -297,7 +403,7 @@ async function checkUpdates() {
       btn.disabled = false;
       return;
     }
-    status.innerHTML = '<span style="color:#6bff6b">Latest release: ' + esc(data.tag_name) + (data.name ? ' — ' + esc(data.name) : '') + '</span>';
+    status.innerHTML = '<span style="color:#6bff6b">Latest release: ' + esc(data.tag_name) + (data.name ? ' &mdash; ' + esc(data.name) : '') + '</span>';
     if (data.assets.length === 0) {
       list.innerHTML = '<div class="empty">No binaries available</div>';
       btn.disabled = false;
