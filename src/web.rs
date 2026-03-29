@@ -142,9 +142,10 @@ async fn handle_request(
                 .as_ref()
                 .map(|v| v.iter().collect())
                 .unwrap_or_default();
+            let snapshot_label = if snapshot.is_some() { "present" } else { "none" };
             debug!(
                 "GET /api/routed: snapshot={}, entries={}",
-                if snapshot.is_some() { "present" } else { "none" },
+                snapshot_label,
                 entries.len()
             );
             json_response(&RoutedResponse {
