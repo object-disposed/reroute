@@ -34,9 +34,9 @@ th.sortable.sort-desc .sort-arrow { opacity: 1; }
 .tag-blue { background: #1a1a5c; color: #6b6bff; }
 .count { color: #888; font-size: 13px; margin-left: 10px; }
 .empty { color: #555; font-style: italic; padding: 20px 0; }
-.age-fresh { color: #6bff6b; }
-.age-mid   { color: #ffd76b; }
-.age-old   { color: #ff6b6b; }
+.ttl-fresh { color: #6bff6b; }
+.ttl-mid   { color: #ffd76b; }
+.ttl-old   { color: #ff6b6b; }
 </style>
 </head>
 <body>
@@ -58,6 +58,7 @@ th.sortable.sort-desc .sort-arrow { opacity: 1; }
         <th class="sortable" id="th-ip" onclick="setRoutedSort('ip')">IP <em class="sort-arrow">&#9650;</em></th>
         <th class="sortable" id="th-comment" onclick="setRoutedSort('comment')">Domain <em class="sort-arrow">&#9650;</em></th>
         <th class="sortable" id="th-age" onclick="setRoutedSort('age')">Last Seen <em class="sort-arrow">&#9650;</em></th>
+        <th class="sortable" id="th-ttl" onclick="setRoutedSort('ttl')">Expires In <em class="sort-arrow">&#9650;</em></th>
       </tr>
     </thead>
     <tbody id="routed-body"></tbody>
@@ -120,10 +121,12 @@ th.sortable.sort-desc .sort-arrow { opacity: 1; }
 
 <script>
 let routedData = [];
-// sortKey: 'ip' | 'comment' | 'age'
+let routedTtlSecs = null; // null = TTL not configured
+
+// sortKey: 'ip' | 'comment' | 'age' | 'ttl'
 // sortDir: 'asc' | 'desc'
-let routedSortKey = 'age';
-let routedSortDir = 'asc'; // asc = oldest first (closest to expiry)
+let routedSortKey = 'ttl';
+let routedSortDir = 'asc'; // asc = expires soonest first
 
 function showTab(id) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -136,7 +139,9 @@ function showTab(id) {
 async function loadRouted() {
   try {
     const r = await fetch('/api/routed');
-    routedData = await r.json();
+    const data = await r.json();
+    routedData = data.entries;
+    routedTtlSecs = data.route_ttl_secs ?? null;
     renderRouted();
   } catch(e) {}
 }
@@ -146,7 +151,6 @@ function setRoutedSort(key) {
     routedSortDir = routedSortDir === 'asc' ? 'desc' : 'asc';
   } else {
     routedSortKey = key;
-    // Default directions: age asc = oldest first; text fields asc = A-Z
     routedSortDir = 'asc';
   }
   updateSortHeaders();
@@ -154,11 +158,12 @@ function setRoutedSort(key) {
 }
 
 function updateSortHeaders() {
-  const cols = ['ip', 'comment', 'age'];
+  const cols = ['ip', 'comment', 'age', 'ttl'];
   const arrowUp = '&#9650;';
   const arrowDown = '&#9660;';
   cols.forEach(col => {
     const th = document.getElementById('th-' + col);
+    if (!th) return;
     th.classList.remove('sort-asc', 'sort-desc');
     const arrow = th.querySelector('.sort-arrow');
     if (col === routedSortKey) {
@@ -171,28 +176,42 @@ function updateSortHeaders() {
 }
 
 /**
- * Format seconds-ago into a human-readable string.
- * ageSecs: how many seconds have elapsed since last_seen_secs.
+ * Format a duration in seconds as a human-readable string.
+ * Works for both elapsed time ("X ago") and remaining time ("in X").
  */
-function formatAge(ageSecs) {
-  if (ageSecs < 0) ageSecs = 0;
-  if (ageSecs < 60)  return ageSecs + 's ago';
-  if (ageSecs < 3600) return Math.floor(ageSecs / 60) + 'm ago';
-  if (ageSecs < 86400) return Math.floor(ageSecs / 3600) + 'h ago';
-  return Math.floor(ageSecs / 86400) + 'd ago';
+function formatDuration(secs) {
+  if (secs < 0) secs = 0;
+  if (secs < 60)    return secs + 's';
+  if (secs < 3600)  return Math.floor(secs / 60) + 'm';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h';
+  return Math.floor(secs / 86400) + 'd';
 }
 
 /**
- * Pick a CSS class for the age cell based on how old the entry is.
- * This gives a visual hint about proximity to expiry.
- * Thresholds are intentionally relative (not tied to route_ttl which
- * the frontend doesn't know), so even without TTL the colour gives
- * useful signal.
+ * Compute remaining TTL in seconds for an entry.
+ * remainingSecs = route_ttl_secs - elapsed_since_last_seen
+ * Returns null if TTL is not configured.
+ * Returns 0 if already expired (shouldn't happen in practice since
+ * server removes expired routes, but handles the edge case gracefully).
  */
-function ageClass(ageSecs) {
-  if (ageSecs < 3600)   return 'age-fresh'; // < 1h  — green
-  if (ageSecs < 21600)  return 'age-mid';   // < 6h  — yellow
-  return 'age-old';                          // >= 6h — red
+function remainingTtl(entry, nowSecs) {
+  if (routedTtlSecs === null) return null;
+  const lastSeen = entry.last_seen_secs || 0;
+  if (lastSeen === 0) return null;
+  const elapsed = nowSecs - lastSeen;
+  return Math.max(0, routedTtlSecs - elapsed);
+}
+
+/**
+ * CSS class for TTL cell: red = close to expiry, yellow = mid, green = plenty of time.
+ * Thresholds are proportional to total TTL so they make sense at any TTL value.
+ */
+function ttlClass(remainingSecs) {
+  if (routedTtlSecs === null) return '';
+  const ratio = remainingSecs / routedTtlSecs;
+  if (ratio <= 0.25) return 'ttl-old';   // <= 25% left — red
+  if (ratio <= 0.5)  return 'ttl-mid';   // <= 50% left — yellow
+  return 'ttl-fresh';                     // > 50% left  — green
 }
 
 function renderRouted() {
@@ -203,21 +222,21 @@ function renderRouted() {
     e.ip.includes(filter) || (e.comment && e.comment.toLowerCase().includes(filter))
   );
 
-  // Sort
   filtered.sort((a, b) => {
     let cmp = 0;
     if (routedSortKey === 'ip') {
-      // Numeric IP sort
       const toNum = ip => ip.split('.').reduce((acc, oct) => acc * 256 + parseInt(oct, 10), 0);
       cmp = toNum(a.ip) - toNum(b.ip);
     } else if (routedSortKey === 'comment') {
       cmp = (a.comment || '').localeCompare(b.comment || '');
+    } else if (routedSortKey === 'age') {
+      // smaller last_seen_secs = older = seen longer ago
+      cmp = (a.last_seen_secs || 0) - (b.last_seen_secs || 0);
     } else {
-      // age: sort by last_seen_secs ascending = oldest first = closest to expiry first
-      // last_seen_secs may be absent for entries loaded from router at startup
-      const aSecs = a.last_seen_secs || 0;
-      const bSecs = b.last_seen_secs || 0;
-      cmp = aSecs - bSecs; // smaller timestamp = older = expires sooner
+      // ttl: smaller remaining = expires sooner
+      const ra = remainingTtl(a, nowSecs) ?? Infinity;
+      const rb = remainingTtl(b, nowSecs) ?? Infinity;
+      cmp = ra - rb;
     }
     return routedSortDir === 'asc' ? cmp : -cmp;
   });
@@ -236,18 +255,22 @@ function renderRouted() {
   tbody.innerHTML = filtered.map(e => {
     const lastSeen = e.last_seen_secs || 0;
     const ageSecs = lastSeen > 0 ? nowSecs - lastSeen : null;
-    const ageText = ageSecs !== null ? formatAge(ageSecs) : '—';
-    const cls = ageSecs !== null ? ageClass(ageSecs) : '';
+    const ageText = ageSecs !== null ? formatDuration(ageSecs) + ' ago' : '\u2014';
+
+    const rem = remainingTtl(e, nowSecs);
+    const ttlText = rem !== null ? 'in ' + formatDuration(rem) : '\u2014';
+    const ttlCls  = rem !== null ? ttlClass(rem) : '';
+
     return '<tr>'
       + '<td>' + esc(e.ip) + '</td>'
       + '<td>' + esc(e.comment || '') + '</td>'
-      + '<td class="' + cls + '">' + esc(ageText) + '</td>'
+      + '<td>' + esc(ageText) + '</td>'
+      + '<td class="' + ttlCls + '">' + esc(ttlText) + '</td>'
       + '</tr>';
   }).join('');
 }
 
 setInterval(loadRouted, 5000);
-// Also re-render every second so the "X ago" labels stay live
 setInterval(() => { if (routedData.length > 0) renderRouted(); }, 1000);
 loadRouted();
 
